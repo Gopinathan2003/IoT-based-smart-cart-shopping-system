@@ -1,0 +1,251 @@
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SoftwareSerial.h>
+#include <HX711_ADC.h> 
+HX711_ADC LoadCell(4, 5); // dt pin, sck pin
+
+#define SS_PIN 10
+#define RST_PIN 9
+#define buzzer 3
+
+MFRC522 mfrc522(SS_PIN, RST_PIN);   // Create MFRC522 instance
+
+// Valid UIDs of Products
+byte validUIDs[][4] = {
+  {0x22, 0xDC, 0x1A, 0x55},  // UID of Product 1
+  {0x61, 0xC2, 0xC9, 0x10},  // UID of Product 2
+  {0x60, 0x3B, 0x35, 0x14},  // UID of Product 3
+  {0x83, 0xBD, 0xF4, 0x14},  // UID of Card Owner
+};
+
+// Product names
+const char* ProductName[] = {
+  "TEAPowder",  // Name of Product 1
+  "MILK",    // Name of Product 2
+  "BUTTER",       // Name of Product 3
+  "  ",
+};
+
+// Product Price
+const int ProductPrice[] = {
+  20,  // Price of Product 1
+  25,    // Price of Product 2
+  45,       // Price of Product 3
+  0,
+};
+
+const int ProductWeight[] = {
+  30,
+  15,
+  35,
+  0,
+};
+
+String purchasedProducts[10]; // Array to store purchased product names and quantities
+int purchasedCount = 0;       // Counter for the number of purchased products
+
+double total;
+float weight;
+float totalweight;
+String* Products;
+int Balance = 1000;
+int count_prod;
+int ProductID;
+int buttonState = 0;
+
+// LCD I2C display
+LiquidCrystal_I2C lcd(0x27, 16, 2);  // Adjust the address and size according to your display
+
+SoftwareSerial mySerial2(6, 7);
+
+void setup() {
+  Serial.begin(9600);   // Initialize serial communication
+  mySerial2.begin(9600);
+  pinMode(2, INPUT);
+  pinMode(buzzer, OUTPUT);
+  SPI.begin();          // Initiate SPI bus
+  mfrc522.PCD_Init();   // Initiate MFRC522
+  lcd.begin(16, 2);     // Initialize the LCD display
+  lcd.init();
+  lcd.backlight();      // Turn on the backlight
+  lcd.clear();
+  lcd.setCursor(2, 0);
+  lcd.print("Scan Products");
+  digitalWrite(buzzer, HIGH);
+  LoadCell.begin(); // start connection to HX711
+  LoadCell.start(1000); // load cells gets 1000ms of time to stabilize
+
+  /////////////////////////////////////
+  LoadCell.setCalFactor(375); // Calibrate your LOAD CELL with 100g weight, and change the value according to readings
+  /////////////////////////////////////
+
+  Serial.println("Ready to read RFID cards");
+}
+
+void loop() {
+  LoadCell.update(); // retrieves data from the load cell
+  weight = LoadCell.getData(); // get output value
+
+  if (weight < 0) {
+    Serial.println("No Load");
+  } else {
+    Serial.print("Weight: ");
+    Serial.print(weight); // print out the retrieved value to the second row
+    Serial.println(" g");
+  }
+     if (weight > totalweight) {
+      digitalWrite(buzzer, LOW);
+    } else {
+      digitalWrite(buzzer, HIGH);
+    }
+
+  buttonState = digitalRead(2);
+
+  // Look for new cards
+  if (mfrc522.PICC_IsNewCardPresent()) {
+    if (mfrc522.PICC_ReadCardSerial()) {
+      // Show UID on serial monitor
+      Serial.print("UID tag: ");
+      for (byte i = 0; i < mfrc522.uid.size; i++) {
+        Serial.print("0x");
+        if (mfrc522.uid.uidByte[i] < 0x10) Serial.print("0");
+        Serial.print(mfrc522.uid.uidByte[i], HEX);
+        if (i < mfrc522.uid.size - 1) Serial.print(", ");
+      }
+      Serial.println();
+      Serial.print("UID Number: ");
+      String content = "";
+      for (byte i = 0; i < mfrc522.uid.size; i++) {
+        content.concat(String(mfrc522.uid.uidByte[i] < 0x10 ? "0" : ""));
+        content.concat(String(mfrc522.uid.uidByte[i], HEX));
+      }
+
+      content.toUpperCase();
+      Serial.println(content);
+
+      if (content == "83BDF414") {
+        updateExit();
+      }
+
+      // Check if the UID matches any of the valid UIDs
+      bool uidMatched = false;
+      int ProductIndex = -1;
+      for (int i = 0; i < sizeof(validUIDs) / sizeof(validUIDs[0]); i++) {
+        if (memcmp(mfrc522.uid.uidByte, validUIDs[i], mfrc522.uid.size) == 0) {
+          uidMatched = true;
+          ProductIndex = i;
+          break;
+        }
+      }
+
+      // Perform actions based on UID match
+      if (uidMatched && (buttonState == LOW)) {
+        updateProduct(ProductIndex + 1, "ADDED");
+        delay(3000);
+      }
+
+      if (uidMatched && (buttonState == HIGH)) {
+        updateProduct(ProductIndex + 1, "Removed");
+        delay(3000);
+      }
+
+      // Clear the LCD display and reset for the next scan
+      lcd.clear();
+      lcd.setCursor(2, 0);
+      lcd.print("Scan Products");
+      lcd.setCursor(2, 1);
+      lcd.print("Count =");
+      lcd.print(count_prod);
+
+      delay(1000);   // Delay to avoid reading the card multiple times in a short period
+    }
+    mfrc522.PICC_HaltA();   // Stop reading
+    mfrc522.PCD_StopCrypto1();  // Stop encryption on PCD
+  }
+}
+
+// Adds or removes items.
+void updateProduct(int ProductID, const char* status) {
+  if ((ProductName[ProductID - 1]) != " ") {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(ProductName[ProductID - 1]); // -1 to adjust for array indexing
+    lcd.print(" ");
+    lcd.print(status);
+    lcd.setCursor(0, 1);  // Set cursor to the second line
+    lcd.print("Price: Rs ");  // Set cursor position after 4 pixels
+    lcd.print(ProductPrice[ProductID - 1]);
+    delay(2000);
+
+    if ((strcmp(status, "ADDED") == 0) && (buttonState == LOW)) {
+      total += ProductPrice[ProductID - 1];
+      totalweight += ProductWeight[ProductID - 1];
+      Serial.println(totalweight);
+      count_prod++;
+      purchasedProducts[purchasedCount++] = String(ProductName[ProductID - 1]) + " - Quantity: 1";
+      displayTotalPrice();
+    } else if ((strcmp(status, "Removed") == 0) && (buttonState == HIGH)) {
+      total -= ProductPrice[ProductID - 1];
+      totalweight -= ProductWeight[ProductID - 1];
+      count_prod--;
+      purchasedProducts[purchasedCount++] = String(ProductName[ProductID - 1]) + " - Quantity: 1";
+      displayTotalPrice();
+    }
+  }
+}
+
+// Updates customer purchase.
+void updateExit() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Dear, Customer");
+  delay(2000);
+  lcd.setCursor(0, 1);
+  lcd.print("Your Total Bill:");
+  lcd.print(total);
+  delay(4000);
+  Balance -= total;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Paid!!!");
+  lcd.setCursor(0, 1);
+  lcd.print("Balance: Rs ");
+  lcd.print(Balance);
+  delay(2000);
+  lcd.setCursor(0, 0);
+  lcd.print("Thank You");
+  lcd.setCursor(0, 1);
+  lcd.print("Visit Again!!");
+  SendSms();
+}
+
+// Sends message based on conditions.
+void SendSms() {
+  String message = "Hi Customer, Your Purchase Details:\n";
+  for (int i = 0; i < purchasedCount; i++) {
+    message += purchasedProducts[i] + "\n";
+  }
+  message += "Total Bill: Rs " + String(total) + "\nBalance: Rs " + String(Balance) + "\nSuccessfully Paid. Thank you.";
+  Serial.println(message);
+  mySerial2.println("AT+CMGF=1");    // Sets the GSM Module in Text Mode
+  delay(1000);  // Delay of 1 second
+  mySerial2.println("AT+CMGS=\"+919944367534\"\r"); // Replace x with mobile number
+  delay(1000);
+  mySerial2.println(message); // Send the SMS message
+  mySerial2.write(0x1A); // End of message (Ctrl+Z)
+  delay(2000);
+  Serial.println("Message Sent");
+  delay(100000);
+}
+
+// Display total price on LCD
+void displayTotalPrice() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Total Price:");
+  lcd.setCursor(0, 1);
+  lcd.print("Rs ");
+  lcd.print(total);
+}
